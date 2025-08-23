@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NP อาหารแช่แข็ง - รายการสั่งซื้อ (หลังร้าน)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // Import Firebase modules ที่จำเป็น
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, query, deleteDoc, getDocs, doc } from "https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js";
+        
+        // html2canvas is loaded as a global variable directly from CDN, no import needed here.
+        // import html2canvas from "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+
+        let app;
+        let db;
+        let auth;
+        let currentAppId;
+        let userId;
+
+        // Function to show a custom confirmation modal
+        function showConfirmModal(message) {
+            return new Promise((resolve) => {
+                const confirmModal = document.getElementById('confirmModal');
+                const modalMessage = document.getElementById('modalMessage');
+                const modalConfirmBtn = document.getElementById('modalConfirmBtn');
+                const modalCancelBtn = document.getElementById('modalCancelBtn');
+
+                modalMessage.textContent = message;
+                modalConfirmBtn.style.display = 'inline-block'; // Show confirm button
+                modalCancelBtn.textContent = 'ยกเลิก'; // Reset cancel button text
+                
+                confirmModal.style.display = 'block';
+
+                modalConfirmBtn.onclick = () => {
+                    confirmModal.style.display = 'none';
+                    resolve(true);
+                };
+
+                modalCancelBtn.onclick = () => {
+                    confirmModal.style.display = 'none';
+                    resolve(false);
+                };
+            });
+        }
+
+        // Function to show simple message modal (replaces alert)
+        function showModalMessage(message, type = 'info') {
+            const confirmModal = document.getElementById('confirmModal');
+            const modalMessage = document.getElementById('modalMessage');
+            const modalConfirmBtn = document.getElementById('modalConfirmBtn');
+            const modalCancelBtn = document.getElementById('modalCancelBtn');
+
+            modalMessage.textContent = message;
+            modalConfirmBtn.style.display = 'none'; // Hide confirm button
+            modalCancelBtn.textContent = 'ปิด'; // Change cancel button to 'Close'
+            confirmModal.style.display = 'block';
+            modalCancelBtn.onclick = () => confirmModal.style.display = 'none'; // Close on click
+        }
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            try {
+                // === START: Firebase Config and Initialization ===
+                // Firebase Config (injected by Canvas or default for local testing)
+                // DO NOT MODIFY THIS BLOCK. Canvas will inject __firebase_config at runtime.
+                // If __firebase_config is not defined (e.g., local testing), use the provided hardcoded values.
+                const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+                    // *** สำคัญมาก: โปรดเปลี่ยน apiKey ตรงนี้ด้วยค่าจริงจาก Firebase Project ของคุณ ***
+                    // *** ไปที่ Firebase Console -> Project settings -> General -> Your apps -> Web app (ชื่อแอปของคุณ) -> Firebase SDK snippet (Config) ***
+                    // *** คัดลอกค่า apiKey มาวางแทนที่ "YOUR_ACTUAL_FIREBASE_API_KEY" ***
+                    apiKey: "AIzaSyAzAJPE2sOsLr7zW1NJxP8SSBO0hBJuSJo",
+                    authDomain: "food-order-b419e.firebaseapp.com",
+                    projectId: "food-order-b419e",
+                    storageBucket: "food-order-b419e.firebasestorage.app",
+                    messagingSenderId: "785024452468",
+                    appId: "1:785024452468:web:6c159e4bea1f74367c4e21",
+                    measurementId: "G-YVP5NPYG08"
+                };
+
+                // App ID (injected by Canvas or default for local testing)
+                // DO NOT MODIFY THIS BLOCK. Canvas will inject __app_id at runtime.
+                currentAppId = typeof __app_id !== 'undefined' ? __app_id : firebaseConfig.projectId;
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                console.log("Firebase app initialized successfully in order.txt.");
+                console.log("Current App ID (from order.txt):", currentAppId);
+
+                // Authenticate user
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated. User ID:", userId);
+                        document.getElementById('currentUserId').textContent = userId; // Display user ID
+                        // Once authenticated, set up Firestore listener
+                        setupFirestoreListener();
+                    } else {
+                        console.log("No user signed in. Attempting anonymous sign-in.");
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                            userId = auth.currentUser.uid;
+                            console.log("Anonymous sign-in successful. User ID:", userId);
+                            document.getElementById('currentUserId').textContent = userId; // Display user ID
+                            setupFirestoreListener();
+                        } catch (error) {
+                            console.error("Firebase authentication error in order.txt:", error);
+                            document.getElementById('orderList').innerHTML = '<p class="error-message">เกิดข้อผิดพลาดในการยืนยันตัวตนผู้ใช้ ไม่สามารถดึงรายการสั่งซื้อได้</p>';
+                        }
+                    }
+                });
+                // === END: Firebase Config and Initialization ===
+
+                const orderListDiv = document.getElementById('orderList');
+                const clearOrdersButton = document.getElementById('clearOrdersButton');
+                const confirmModal = document.getElementById('confirmModal');
+                const modalMessage = document.getElementById('modalMessage');
+                const modalConfirmBtn = document.getElementById('modalConfirmBtn');
+                const modalCancelBtn = document.getElementById('modalCancelBtn');
+
+                // Function to safely parse date strings, handling the DD/M/YYYY HH:MM:SS format
+                function parseDateString(dateString) {
+                    console.log("Original timestamp:", dateString); // Debug log the original timestamp
+                    
+                    // Regular expression to match DD/M/YYYY HH:MM:SS or DD/M/YY HH:MM:SS
+                    const match = dateString.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s(\d{1,2}):(\d{2}):(\d{2})/);
+                    
+                    if (match) {
+                        let day = parseInt(match[1], 10);
+                        let month = parseInt(match[2], 10) - 1; // Month is 0-indexed in JavaScript Date
+                        let year = parseInt(match[3], 10);
+                        let hours = parseInt(match[4], 10);
+                        let minutes = parseInt(match[5], 10);
+                        let seconds = parseInt(match[6], 10);
+
+                        // Adjust for 2-digit years if necessary (e.g., 68 -> 2068, 98 -> 1998)
+                        if (year < 100) {
+                            year += (year < 70) ? 2000 : 1900;
+                        }
+
+                        const date = new Date(year, month, day, hours, minutes, seconds);
+                        console.log("Parsed Date object:", date); // Debug log the parsed Date object
+                        return date;
+                    }
+                    
+                    console.warn("Could not parse date string, attempting default Date parsing:", dateString);
+                    // Fallback to default Date parsing if regex fails, also try replacing dot with colon for time
+                    return new Date(dateString.replace(/(\d{2})\.(\d{2})$/, '$1:$2'));
+                }
+
+
+                function renderOrders(orders) {
+                    console.log("renderOrders function called."); // Debug log
+                    orderListDiv.innerHTML = ''; // Clear previous orders
+                    if (orders.length === 0) {
+                        orderListDiv.innerHTML = '<p class="no-orders-message">ยังไม่มีรายการสั่งซื้อในขณะนี้</p>';
+                        console.log("No orders to render."); // Debug log
+                        return;
+                    }
+                    
+                    // เรียงออเดอร์ทั้งหมดตาม timestamp จากเก่าสุดไปใหม่สุด โดยใช้ฟังก์ชัน parseDateString
+                    orders.sort((a, b) => {
+                        const dateA = parseDateString(a.timestamp);
+                        const dateB = parseDateString(b.timestamp);
+                        return dateA.getTime() - dateB.getTime();
+                    });
+                    console.log("Orders after chronological sorting and date parsing:", orders); // Debug log
+
+                    let orderIndex = 1; // ตัวนับออเดอร์สำหรับแต่ละวัน
+                    let currentDate = null; // เก็บวันที่ปัจจุบันที่กำลังแสดงผล
+
+                    orders.forEach(order => {
+                        // แยกส่วนวันที่ออกจาก timestamp (เช่น '23/8/2568')
+                        // ใช้ RegEx เพื่อให้ได้รูปแบบที่ถูกต้อง เช่น '23/8/2568'
+                        const datePartMatch = order.timestamp.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+                        const orderDate = datePartMatch ? datePartMatch[1] : 'Unknown Date';
+
+
+                        // ตรวจสอบว่าวันที่มีการเปลี่ยนแปลงหรือไม่
+                        if (orderDate !== currentDate) {
+                            // ถ้าเป็นวันใหม่ ให้รีเซ็ตตัวนับออเดอร์และอัปเดตวันที่ปัจจุบัน
+                            orderIndex = 1;
+                            currentDate = orderDate;
+
+                            // (ไม่บังคับ) เพิ่มหัวข้อสำหรับวันที่ใหม่เพื่อให้เห็นชัดเจน
+                            const dateHeading = document.createElement('h2');
+                            dateHeading.textContent = `รายการสั่งซื้อวันที่ ${orderDate}`;
+                            dateHeading.classList.add('date-heading'); // เพิ่มคลาสเพื่อจัดสไตล์
+                            orderListDiv.appendChild(dateHeading);
+                        }
+
+                        const orderCard = document.createElement('div');
+                        orderCard.classList.add('order-card');
+                        orderCard.id = `order-${order.id}`; // Add a unique ID for html2canvas targeting
+
+                        let itemsHtml = '<ul>';
+                        order.items.forEach(item => {
+                            itemsHtml += `<li>${item.name} x ${item.quantity} (${item.price} บาท/ชิ้น)</li>`;
+                        });
+                        itemsHtml += '</ul>';
+
+                        orderCard.innerHTML = `
+                            <span class="order-number">#${orderIndex++}</span> <!-- Display order number -->
+                            <h3>Order ID: ${order.customOrderId || order.id}</h3>
+                            <p><strong>วันที่/เวลา:</strong> ${order.timestamp}</p>
+                            <p><strong>ชื่อ-นามสกุล:</strong> ${order.customer.name}</p>
+                            <p><strong>เบอร์โทรศัพท์:</strong> ${order.customer.tel}</p>
+                            <p><strong>ที่อยู่จัดส่ง:</strong> ${order.customer.address}</p>
+                            ${order.customer.room ? `<p><strong>ห้อง/เลขที่:</strong> ${order.customer.room}</p>` : ''}
+                            ${order.customer.floor ? `<p><strong>ชั้น:</strong> ${order.customer.floor}</p>` : ''}
+                            <p><strong>รายการอาหาร:</strong></p>
+                            ${itemsHtml}
+                            <p><strong>รวมทั้งหมด:</strong> ${order.totalAmount} บาท</p>
+                            <p><strong>วิธีการชำระเงิน:</strong> ${order.paymentMethod === 'cash' ? 'เงินสด' : (order.paymentMethod === 'transfer' ? 'โอนเงิน' : 'สแกน QR Code')}</p>
+                            <!-- Updated to show Base64 image directly -->
+                            ${order.slipBase64Data ? `<p><strong>สลิปหลักฐาน:</strong><br><img src="${order.slipBase64Data}" style="max-width: 100%; height: auto; border-radius: 8px; margin-top: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);" alt="หลักฐานการโอนเงิน"></p>` : '<p><strong>สลิปหลักฐาน:</strong> ไม่พบ</p>'}
+                            <p style="font-size:0.9em; color:#888;">User ID: ${order.userId || 'N/A'}</p>
+                            <div class="card-actions">
+                                <button class="delete-order-btn" data-id="${order.id}">ลบรายการนี้</button>
+                                <button class="save-receipt-image-btn" data-target-id="order-${order.id}" data-order-id="${order.customOrderId || order.id}">บันทึกใบเสร็จเป็นรูปภาพ</button>
+                            </div>
+                        `;
+                        orderListDiv.appendChild(orderCard);
+                    });
+
+                    // Add event listeners to delete and save buttons after rendering
+                    document.querySelectorAll('.delete-order-btn').forEach(button => {
+                        button.addEventListener('click', async (event) => {
+                            const orderIdToDelete = event.target.dataset.id;
+                            console.log(`Attempting to delete order with ID: ${orderIdToDelete}`); // Debug log
+                            const confirmed = await showConfirmModal('คุณต้องการลบรายการสั่งซื้อนี้ใช่หรือไม่?');
+                            if (confirmed) {
+                                try {
+                                    const orderDocRef = doc(db, `artifacts/${currentAppId}/public/data/orders`, orderIdToDelete);
+                                    console.log(`Deleting document at path: artifacts/${currentAppId}/public/data/orders/${orderIdToDelete}`); // Debug log
+                                    await deleteDoc(orderDocRef);
+                                    showModalMessage('ลบรายการสั่งซื้อเรียบร้อยแล้ว', 'success');
+                                    console.log(`Order ${orderIdToDelete} deleted successfully.`); // Success log
+                                } catch (e) {
+                                    console.error("Error deleting document: ", e); // Error log
+                                    showModalMessage('เกิดข้อผิดพลาดในการลบรายการสั่งซื้อ', 'error');
+                                }
+                            } else {
+                                console.log("Delete operation cancelled by user."); // User cancelled log
+                            }
+                        });
+                    });
+
+                    document.querySelectorAll('.save-receipt-image-btn').forEach(button => {
+                        button.addEventListener('click', async (event) => {
+                            const targetId = event.target.dataset.targetId;
+                            const orderId = event.target.dataset.orderId;
+                            const orderCardElement = document.getElementById(targetId);
+                            if (orderCardElement) {
+                                await saveReceiptAsImage(orderCardElement, orderId);
+                            } else {
+                                console.error("Could not find order card element to save:", targetId);
+                                showModalMessage('ไม่พบข้อมูลใบเสร็จที่ต้องการบันทึก', 'error');
+                            }
+                        });
+                    });
+                }
+
+                // Function to save an HTML element as an image using html2canvas
+                async function saveReceiptAsImage(element, orderId) {
+                    showModalMessage('กำลังสร้างรูปภาพใบเสร็จ...', 'info');
+                    try {
+                        // Temporarily hide buttons within the element before capturing
+                        const buttons = element.querySelectorAll('.card-actions');
+                        buttons.forEach(btn => btn.style.display = 'none');
+
+                        // Ensure html2canvas is available globally
+                        if (typeof html2canvas === 'undefined') {
+                            console.error("html2canvas library is not loaded.");
+                            showModalMessage('ไม่สามารถสร้างรูปภาพได้: ไลบรารี html2canvas ไม่พร้อมใช้งาน', 'error');
+                            return;
+                        }
+
+                        const canvas = await html2canvas(element, {
+                            scale: 2, // Increase scale for better quality
+                            useCORS: true, // Important if images are loaded from other domains
+                            logging: false // Disable logging to console
+                        });
+
+                        // Restore buttons visibility after capturing
+                        buttons.forEach(btn => btn.style.display = 'flex'); // Assuming they were flex
+
+                        const image = canvas.toDataURL('image/png');
+                        const link = document.createElement('a');
+                        link.href = image;
+                        link.download = `receipt_${orderId}.png`;
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                        showModalMessage('บันทึกรูปภาพใบเสร็จเรียบร้อยแล้ว!', 'success');
+                    } catch (error) {
+                        console.error("Error generating image: ", error);
+                        showModalMessage('เกิดข้อผิดพลาดในการสร้างรูปภาพใบเสร็จ', 'error');
+                    }
+                }
+
+                function setupFirestoreListener() {
+                    if (!db || !currentAppId) {
+                        console.error("Firestore or App ID not available for listener setup.");
+                        document.getElementById('orderList').innerHTML = '<p class="error-message">ระบบยังไม่พร้อมใช้งาน ไม่สามารถดึงรายการสั่งซื้อได้</p>';
+                        return;
+                    }
+                    const ordersCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/orders`);
+                    console.log("Attempting to set up Firestore listener for collection:", `artifacts/${currentAppId}/public/data/orders`); // Debug log
+
+                    onSnapshot(ordersCollectionRef, (snapshot) => {
+                        console.log("onSnapshot triggered!"); // Debug log
+                        if (snapshot.empty) {
+                            console.log("No orders found in the collection (snapshot is empty)."); // Debug log
+                            document.getElementById('orderList').innerHTML = '<p class="no-orders-message">ยังไม่มีรายการสั่งซื้อในขณะนี้</p>';
+                            return;
+                        }
+
+                        const orders = [];
+                        snapshot.forEach(doc => {
+                            orders.push({ id: doc.id, ...doc.data() });
+                        });
+                        console.log("Fetched orders from Firestore:", orders); // Debug log the actual data
+                        renderOrders(orders);
+                    }, (error) => {
+                        console.error("Error listening to Firestore:", error); // Log Firestore errors
+                        document.getElementById('orderList').innerHTML = `<p class="error-message">เกิดข้อผิดพลาดในการดึงรายการสั่งซื้อ: ${error.message}</p>`;
+                    });
+                }
+
+                clearOrdersButton.addEventListener('click', async () => {
+                    const confirmed = await showConfirmModal('คุณต้องการล้างรายการสั่งซื้อทั้งหมดใช่หรือไม่?');
+                    if (confirmed) {
+                        try {
+                            const ordersCollectionRef = collection(db, `artifacts/${currentAppId}/public/data/orders`);
+                            const querySnapshot = await getDocs(ordersCollectionRef);
+                            const deletePromises = [];
+                            querySnapshot.forEach((doc) => {
+                                deletePromises.push(deleteDoc(doc.ref));
+                            });
+                            await Promise.all(deletePromises);
+                            showModalMessage('ล้างรายการสั่งซื้อเรียบร้อยแล้ว', 'success');
+                        } catch (e) {
+                            console.error("Error clearing orders: ", e);
+                            showModalMessage('เกิดข้อผิดพลาดในการล้างรายการสั่งซื้อ', 'error');
+                        }
+                    }
+                });
+
+            } catch (mainError) {
+                console.error("An unexpected error occurred during page initialization in order.txt:", mainError);
+                document.getElementById('orderList').innerHTML = `<p class="error-message">เกิดข้อผิดพลาดที่ไม่คาดคิดในการโหลดหน้า: ${mainError.message}</p>`;
+            }
+        });
+    </script>
+    <style>
+        body {
+            font-family: 'Kanit', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        .container {
+            max-width: 100%; /* Changed to 100% to allow more cards horizontally */
+            margin: 20px auto;
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #d32f2f;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        /* Updated CSS for horizontal layout and wrapping */
+        .order-list {
+            display: flex; /* Use flexbox */
+            flex-wrap: wrap; /* Allow items to wrap to the next line */
+            justify-content: center; /* Center items horizontally */
+            gap: 20px; /* Space between order cards */
+            padding-bottom: 10px; /* Add some padding for scrollbar */
+        }
+        .order-card {
+            /* Adjusted width to allow approximately 3 cards per row in a wider container */
+            flex: 0 0 calc(33.33% - 20px); /* Adjust for 3 cards per row, accounting for gap */
+            max-width: calc(33.33% - 20px); /* Ensure max width for responsiveness */
+            box-sizing: border-box; /* Include padding and border in the element's total width and height */
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            position: relative; /* Needed for absolute positioning of order-number */
+            margin-bottom: 20px; /* Space between rows of cards */
+        }
+
+        /* Media queries for responsiveness */
+        @media (min-width: 1600px) { /* For even larger screens, show 6 cards per row */
+            .order-card {
+                flex: 0 0 calc(16.66% - 17px); /* Approximately 6 cards per row */
+                max-width: calc(16.66% - 17px);
+            }
+        }
+        @media (min-width: 1200px) and (max-width: 1599px) { /* For larger screens, show 4 cards per row */
+            .order-card {
+                flex: 0 0 calc(25% - 15px); /* Approximately 4 cards per row */
+                max-width: calc(25% - 15px);
+            }
+        }
+        @media (min-width: 769px) and (max-width: 1199px) { /* For medium screens, show 3 cards per row */
+            .order-card {
+                flex: 0 0 calc(33.33% - 20px);
+                max-width: calc(33.33% - 20px);
+            }
+        }
+
+
+        @media (max-width: 768px) { /* For tablets, show 2 cards per row */
+            .order-card {
+                flex: 0 0 calc(50% - 15px);
+                max-width: calc(50% - 15px);
+            }
+        }
+
+        @media (max-width: 480px) { /* For mobile phones, show 1 card per row */
+            .order-card {
+                flex: 0 0 100%;
+                max-width: 100%;
+            }
+            .date-heading {
+                font-size: 1.4em; /* Adjust font size for mobile */
+            }
+        }
+
+
+        /* New CSS for order number */
+        .order-number {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background-color: #4CAF50; /* Green background */
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+            font-size: 0.9em;
+            z-index: 10; /* Ensure it's above other content */
+        }
+        .order-card h3 {
+            color: #d32f2f;
+            margin-top: 0;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #ffebee;
+            padding-bottom: 10px;
+            padding-left: 50px; /* Adjust padding to make space for the order number */
+        }
+        .order-card p {
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+        .order-card ul {
+            list-style: none;
+            padding: 0;
+            margin-top: 10px;
+            border-top: 1px dashed #eee;
+            padding-top: 10px;
+        }
+        .order-card ul li {
+            margin-bottom: 5px;
+            color: #555;
+        }
+        .order-card .total-amount {
+            font-size: 1.2em;
+            font-weight: 700;
+            color: #2e7d32;
+            text-align: right;
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 2px solid #e8f5e9;
+        }
+        .no-orders-message, .error-message {
+            text-align: center;
+            color: #777;
+            padding: 20px;
+            border: 1px dashed #ccc;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+            width: 100%; /* Ensure it takes full width when no orders */
+        }
+        .error-message {
+            color: #d32f2f;
+            background-color: #ffebee;
+            border-color: #f44336;
+        }
+        .card-actions { /* Flex container for buttons within card */
+            display: flex;
+            justify-content: flex-end; /* Align buttons to the right */
+            gap: 10px; /* Space between buttons */
+            margin-top: 15px;
+        }
+        .delete-order-btn {
+            background-color: #ff9800; /* Orange for delete */
+            color: white;
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.3s ease;
+        }
+        .delete-order-btn:hover {
+            background-color: #fb8c00;
+        }
+        .save-receipt-image-btn { /* New style for save button */
+            background-color: #2196f3; /* Blue for save */
+            color: white;
+            padding: 8px 15px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.3s ease;
+        }
+        .save-receipt-image-btn:hover {
+            background-color: #1976d2;
+        }
+
+        /* Styles for the clear all orders button */
+        .clear-button-container {
+            text-align: center;
+            margin-top: 30px;
+        }
+        .clear-button {
+            background-color: #f44336; /* Red background */
+            color: white;
+            padding: 12px 25px;
+            border: 2px solid #d32f2f; /* Red border */
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }
+        .clear-button:hover {
+            background-color: #d32f2f; /* Darker red on hover */
+            border-color: #c62828; /* Darker border on hover */
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none; /* Hidden by default */
+            position: fixed; /* Stay in place */
+            z-index: 1000; /* Sit on top */
+            left: 0;
+            top: 0;
+            width: 100%; /* Full width */
+            height: 100%; /* Full height */
+            overflow: auto; /* Enable scroll if needed */
+            background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
+            padding-top: 60px;
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 5% auto; /* 15% from the top and centered */
+            padding: 20px;
+            border: 1px solid #888;
+            border-radius: 10px;
+            width: 80%; /* Could be more or less, depending on screen size */
+            max-width: 400px;
+            text-align: center;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        .modal-buttons {
+            margin-top: 20px;
+        }
+        .modal-buttons button {
+            background-color: #4CAF50; /* Green */
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 0 10px;
+            transition: background-color 0.3s ease;
+        }
+        .modal-buttons button:hover {
+            background-color: #45a049;
+        }
+        .modal-buttons button:last-child {
+            background-color: #f44336; /* Red */
+        }
+        .modal-buttons button:last-child:hover {
+            background-color: #d32f2f;
+        }
+        /* เพิ่มสไตล์สำหรับหัวข้อวันที่ */
+        .date-heading {
+            width: 100%; /* ให้หัวข้อเต็มความกว้าง */
+            text-align: center;
+            margin: 30px 0 15px 0;
+            color: #1a73e8; /* สีน้ำเงิน */
+            font-size: 1.8em;
+            font-weight: 600;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>รายการสั่งซื้อ (หลังร้าน)</h1>
+        <p style="text-align: center; font-size: 0.9em; color: #666;">
+            User ID: <span id="currentUserId">กำลังโหลด...</span>
+        </p>
+        <div id="orderList" class="order-list">
+            <!-- Order items will be loaded here by JavaScript -->
+            <p class="loading-message">กำลังโหลดรายการสั่งซื้อ...</p>
+        </div>
+        <div class="clear-button-container">
+            <button id="clearOrdersButton" class="clear-button">ล้างรายการสั่งซื้อทั้งหมด</button>
+        </div>
+    </div>
+
+    <!-- The Modal -->
+    <div id="confirmModal" class="modal">
+        <div class="modal-content">
+            <p id="modalMessage"></p>
+            <div class="modal-buttons">
+                <button id="modalConfirmBtn">ยืนยัน</button>
+                <button id="modalCancelBtn">ยกเลิก</button>
+            </div>
+        </div>
+    </div>
+    <!-- Script tag for html2canvas (must be outside type="module" script if using global access) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+</body>
+</html>
+
